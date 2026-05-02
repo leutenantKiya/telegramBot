@@ -37,19 +37,11 @@ Isi file `.env` tersebut dengan format berikut:
 # Token Bot Telegram (Didapatkan dari BotFather di Telegram)
 TELEGRAM_TOKEN=your_telegram_bot_token_here
 
-# API Key untuk Google Gemini AI (Didapatkan dari Google AI Studio)
-GEMINI_API_KEY=your_gemini_api_key_here
+# API Key untuk Open Router (Didapatkan dari openrouter.ai)
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 
-# Kredensial Database MongoDB (Untuk menyimpan log chat & data user)
-DB_USERNAME=your_mongodb_username
-DB_PASSWORD=your_mongodb_password
-
-# Konfigurasi n8n (Opsional, khusus jika Anda memakai webhook eksternal n8n)
-N8N_MATAKULIAH_WEBHOOK_URL=https://your-n8n-url.com/webhook/matakuliah
-N8N_WEBHOOK_SECRET=your_webhook_secret_here
-
-# Pengaturan batas waktu Scraper (dalam detik)
-REQUEST_TIMEOUT_SECONDS=60
+# URI Koneksi Database MongoDB Atlas
+MONGO_URI=mongodb+srv://username:password@cluster.mongodb.net/
 
 # Kunci Enkripsi untuk Password E-Class (Fernet Key)
 # Digunakan untuk mengenkripsi password akun e-class yang disimpan ke DB
@@ -68,6 +60,7 @@ Untuk menjalankan sistem secara penuh, pastikan virtual environment sudah aktif,
 ```bash
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+> **Catatan:** Karena bot saat ini berjalan menggunakan metode *Polling*, sangat disarankan untuk tidak menggunakan opsi `--workers` (multi-worker) agar tidak terjadi duplikasi pemrosesan pesan dari Telegram.
 
 Jika Anda hanya ingin menjalankan dan mengetes *API scraper* (tanpa bot Telegram menyala):
 ```bash
@@ -85,8 +78,8 @@ graph TD
     User([Telegram User]) -->|Kirim Pesan / Perintah| Bot[Main Bot - FastAPI]
     Bot -->|Cek Sesi / DB| DB[(MongoDB)]
     
-    Bot -->|Jika Pesan Umum| Gemini[Google Gemini AI]
-    Gemini -->|Balasan AI| Bot
+    Bot -->|Jika Pesan Umum| OpenRouter[Open Router AI]
+    OpenRouter -->|Balasan AI| Bot
     
     Bot -->|Jika Perintah E-Class / /login /materi| API[Scraper API - Internal FastAPI]
     API <-->|Request Web Scraping| EClass[Web E-Class Kampus]
@@ -99,8 +92,8 @@ graph TD
 2. **Penerimaan Pesan:** Saat user Telegram menekan `/start` atau mengirim pesan, Telegram Bot menangkapnya. Modul `handle_db.py` akan otomatis menyimpan/memperbarui data profil Telegram pengguna ke MongoDB.
 3. **Pemrosesan Perintah (Routing):**
    - **Perintah E-Class (`/login`, `/matakuliah`, `/materi [ID]`, `masuk [ID]`):** Bot akan memeriksa *cookies* sesi user di memori (`user_sessions`). Setelah itu, bot akan secara internal memanggil router API FastAPI. Router ini meniru aksi *browser* (Web Scraping) menggunakan token/cookie untuk mengambil jadwal, materi, atau menekan tombol presensi pada web E-Class kampus.
-   - **Tombol Unduh Materi (`handle_materi_callback`):** Ketika tombol unduh ditekan, bot me-*request* langsung file ke web E-Class dan mengirimkan balasan berupa dokumen Telegram ke pengguna.
-   - **Pesan Biasa (Obrolan):** Jika teks bukan perintah sistem, pesannya diteruskan ke **Google Gemini AI**. AI ini sudah diprogram (melalui *system prompt*) dengan persona **Asisten Jawa Krama Inggil**, sehingga merespons dengan sopan berbahasa Jawa.
+   - **Tombol Unduh Materi (`handle_materi_callback`):** Ketika tombol unduh ditekan, bot memvalidasi *cache* dari MongoDB, lalu me-*request* langsung file ke web E-Class dan mengirimkan balasan berupa dokumen Telegram ke pengguna.
+   - **Pesan Biasa (Obrolan):** Jika teks bukan perintah sistem, pesannya diteruskan ke **Open Router AI** menggunakan pustaka `AsyncOpenAI` agar tidak memblokir antrean pesan lainnya. AI ini sudah diprogram (melalui *system prompt*) dengan persona **Asisten Jawa Krama Inggil**, sehingga merespons dengan sopan berbahasa Jawa.
 4. **Respons Akhir:** Bot mengembalikan hasil (berupa teks daftar matakuliah, file materi, atau teks percakapan) ke pengguna. Jika panjang pesan melebihi limit Telegram (4000 karakter), bot akan membaginya menjadi beberapa pesan berurutan.
 
 ---
@@ -111,14 +104,15 @@ graph TD
 Berfungsi menghubungkan bot dengan MongoDB menggunakan pustaka `pymongo`. Mengatur manajemen data pengguna dan rekam jejak.
 - **`save_user()`**: Menyimpan profil dasar pengguna (ID, username, first name) saat pertama kali interaksi.
 - **`getName()`**: Membaca nama panggilan khusus (*preferred name*) dari database untuk panggilan yang lebih personal.
-- **`saveChatLog()`**: Mencatat riwayat *chat* antara user dan bot (Gemini) untuk konteks AI atau keperluan audit.
+- **`saveChatLog()`**: Mencatat riwayat *chat* antara user dan bot (Open Router) untuk konteks AI atau keperluan audit.
 - **`validate_user()`**: Mengunci akses agar hanya pengguna yang terdaftar/valid yang bisa memakai fitur API kampus.
+- **Cache Database (`save_materi_cache`, `get_materi_cache`)**: Menyimpan sementara (*cache*) daftar materi dari web kampus ke MongoDB dengan fitur *Auto-Expiry (TTL)* selama 15 menit agar performa bot stabil dan tidak membocorkan memori (memory leak).
 
 ### 2. Logika Utama Bot Telegram (`main.py`)
 File eksekutor dan pengontrol utama bot Telegram.
 - **Manajemen Sesi:** `/login` akan menyimpan *cookies* akses di memori (dictionary `user_sessions`) selama aplikasi berjalan.
 - **Handler Akademik:** Memproses perintah-perintah kuliah seperti `/matakuliah` (jadwal kelas), `/materi` (modul/tugas), dan presensi teks `masuk [ID]`.
-- **Integrasi Gemini AI:** Fungsi `gemini_instruction` mendefinisikan persona, dan `handle_telegram_message` mengelola tanya-jawab bebas *user* ke Gemini.
+- **Integrasi Open Router AI:** Fungsi instruksi mendefinisikan persona, dan `handle_telegram_message` mengelola tanya-jawab bebas *user* ke Open Router.
 
 ### 3. Backend Scraper API (`request_handler.py` & `routes/`)
 Pusat logika API web-scraping E-Class. `request_handler.py` mengatur server API independen.
@@ -127,4 +121,4 @@ Pusat logika API web-scraping E-Class. `request_handler.py` mengatur server API 
 ---
 
 > [!TIP]
-> **Catatan Pengembangan:** Mengingat `user_sessions` dan `materi_cache` masih disimpan di dalam RAM lokal server, sesi login pengguna akan hilang saat bot dimatikan (*restart*). Jika ingin data login bertahan lebih lama tanpa perlu user login ulang setiap bot restart, pertimbangkan memindahkan mekanisme penyimpanan cookie E-Class ke database MongoDB.
+> **Catatan Pengembangan:** Daftar materi (`materi_cache`) sudah menggunakan MongoDB dengan fitur *TTL auto-cleanup*. Namun, sesi login (`user_sessions`) pengguna masih disimpan di dalam RAM lokal server, sehingga sesi pengguna akan hilang saat bot dimatikan (*restart*). Jika ingin data sesi bertahan lebih lama, pertimbangkan memindahkan mekanisme penyimpanan cookie E-Class ini ke database MongoDB seperti yang dilakukan pada cache materi.

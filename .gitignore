@@ -1,4 +1,20 @@
-__pycache__/
-.env
-Procfile
+# Environments
+venv/
+env/
+.venv/
 
+# Secrets & Configs
+.env
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE & OS Files
+.vscode/
+.idea/
+.DS_Store
+
+# Deployment / Server
+Procfile

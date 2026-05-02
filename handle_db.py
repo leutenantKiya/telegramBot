@@ -1,7 +1,7 @@
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timedelta
 try:
     # for auto login protocol since i will have to store the pass and retrieve it back
     from cryptography.fernet import Fernet, InvalidToken
@@ -12,17 +12,33 @@ except ImportError:
 import os
 
 load_dotenv()
-USERNAME = os.getenv("DB_USERNAME")
-PASSWORD = os.getenv("DB_PASSWORD")
 
-# print(USERNAME, PASSWORD)
-HOST = "localhost"
-PORT = 27017
-
-uri = f"mongodb://{USERNAME}:{PASSWORD}@{HOST}:{PORT}/?authSource=admin"
-client = MongoClient(uri)
+uri = os.getenv("MONGO_URI")
+client = MongoClient(
+    uri,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=10000,
+    socketTimeoutMS=20000,
+    retryWrites=True,
+    retryReads=True,
+    maxPoolSize=10,
+    minPoolSize=1,
+)
 db_user = client['user']
 user_collection = db_user['user_log']
+
+# materi cache collection (lazy reference — no connection until first query)
+materi_cache_col = db_user['materi_cache']
+
+MATERI_CACHE_TTL_MINUTES = 15
+
+def init_db():
+    """Create indexes safely. Call this from app startup (e.g. FastAPI lifespan), not at import time."""
+    try:
+        materi_cache_col.create_index("expires_at", expireAfterSeconds=0)
+        print("✅ MongoDB indexes created successfully")
+    except Exception as e:
+        print(f"⚠️ MongoDB index creation failed (app will still run): {e}")
 
 class CredentialStorageError(Exception):
     pass
@@ -99,6 +115,34 @@ def getLogHistory(user_id):
         log_data = user_collection.find({"user_id" : user_id})
     except Exception as e:
         print(e)
+
+# ─── Materi Cache (MongoDB with TTL) ───
+def save_materi_cache(user_id, materi_list):
+    """Cache materi list for a user. Auto-expires after MATERI_CACHE_TTL_MINUTES."""
+    try:
+        materi_cache_col.update_one(
+            {"user_id": str(user_id)},
+            {"$set": {
+                "user_id": str(user_id),
+                "materi": materi_list,
+                "expires_at": datetime.utcnow() + timedelta(minutes=MATERI_CACHE_TTL_MINUTES),
+                "updated_at": datetime.utcnow()
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"save_materi_cache error: {e}")
+
+def get_materi_cache(user_id):
+    """Get cached materi. Returns list or None if expired/missing."""
+    try:
+        doc = materi_cache_col.find_one({"user_id": str(user_id)})
+        if doc and doc.get("materi"):
+            return doc["materi"]
+        return None
+    except Exception as e:
+        print(f"get_materi_cache error: {e}")
+        return None
 
 def validate_user(user_id):
     # check if user exist

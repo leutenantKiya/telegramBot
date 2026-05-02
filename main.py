@@ -1,3 +1,5 @@
+from openai import AsyncOpenAI
+import asyncio
 import os
 import json
 import requests
@@ -15,6 +17,9 @@ from handle_db import (
     validate_user,
     save_eclass_credentials,
     get_eclass_credentials,
+    save_materi_cache,
+    get_materi_cache,
+    init_db,
     CredentialStorageError
 )
 from config import Config
@@ -24,8 +29,7 @@ from routes.matakuliah import get_matakuliah
 from routes.materi import get_materi
 from routes.presensi import presensi as submit_presensi
 
-from google import genai
-from google.genai import types
+
 from fastapi import FastAPI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
@@ -52,32 +56,19 @@ socket.getaddrinfo = new_getaddrinfo
 
 load_dotenv()
 
-n8n_matakuliah_url = os.getenv("N8N_MATAKULIAH_WEBHOOK_URL")
-n8n_webhook_secret = os.getenv("N8N_WEBHOOK_SECRET")
-n8n_matakuliah_enabled = os.getenv("USE_N8N_MATAKULIAH", "false").lower() in {"1", "true", "yes", "on"}
 GET_NAME = 0
 GET_LOGIN = 1
-GEMINI_MODEL = 'gemini-2.5-flash'
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY"), 
-    http_options=types.HttpOptions(timeout=120 * 1000)
+client = AsyncOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPEN_ROUTER_KEY"),
+    timeout=60.0,
+    max_retries=2,
 )
 # Store user sessions
 user_sessions = {}
 
 def get_user_id(update: Update):
     return str(update.effective_user.id)
-
-def get_request_timeout():
-    try:
-        return int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
-    except ValueError:
-        return 60
-
-def get_n8n_headers():
-    if not n8n_webhook_secret:
-        return {}
-    return {"X-Bot-Secret": n8n_webhook_secret}
 
 # set session
 def set_eclass_session(user_id, id_user, cookies):
@@ -414,27 +405,7 @@ def parse_matakuliah_response(data):
 
     return None, "Unexpected response format from matakuliah service."
 
-def get_response_body(response):
-    try:
-        return response.json()
-    except ValueError:
-        return response.text
-
-def request_matakuliah(user_id, cookies):
-    if n8n_matakuliah_enabled and n8n_matakuliah_url:
-        response = requests.post(
-            n8n_matakuliah_url,
-            json={
-                "action": "matakuliah",
-                "source": "telegram-bot",
-                "telegram_user_id": user_id,
-                "cookies": cookies
-            },
-            headers=get_n8n_headers(),
-            timeout=get_request_timeout()
-        )
-        return response.ok, get_response_body(response)
-
+def request_matakuliah(cookies):
     data = get_matakuliah({"cookies": cookies})
     return data.get("success", False), data
 
@@ -445,7 +416,7 @@ async def reply_text(update: Update, text):
     else:
         await update.message.reply_text(text)
 
-def gemini_instruction(user_name):
+def instruction(user_name):
     displayed_name = user_name if user_name else "Juragan"
     return f"""
     Sampeyan adalah asisten virtual berjiwa Jawa tulen yang sangat sopan (andhap asor) dan ramah.
@@ -453,7 +424,7 @@ def gemini_instruction(user_name):
     Sebut diri sampeyan 'Kulo' atau 'Dalem', dan panggil user dengan sebutan '{displayed_name}', 'Mas', 'Mbak', atau 'Juragan'.
 
     PENTING:
-    Nama user adalah {displayed_name}.
+    Nama user adalah {displayed_name}. Nalika user takon nganggo bahasa indonesia, bales nganggo bahasa indonesia.
     Jika ditanya tentang apapun, jawablah dengan pengetahuan yang sampeyan miliki. Jangan membatasi diri.
     Sampeyan memiliki pengetahuan luas tentang dunia modern, termasuk software engineering, programming (Python, MQTT, dll), dan teknologi.
     JANGAN menolak untuk menjawab pertanyaan tentang teknologi modern. Sebaliknya, jelaskan dengan perumpamaan kearifan lokal Jawa jika cocok, tetapi SELALU berikan jawaban teknis yang paling tepat dan akurat.
@@ -531,13 +502,13 @@ async def matakuliah_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Sabar nggih Juragan, kulo padosi daftar matakuliah panjenengan...")
     
     try:
-        ok, data = request_matakuliah(user_id, cookies)
+        ok, data = request_matakuliah(cookies)
         result_text, error_msg = parse_matakuliah_response(data)
         if not ok and is_eclass_session_error(error_msg or result_text):
             cookies = await get_or_restore_eclass_cookies(user_id, update.message, force=True)
             if not cookies:
                 return
-            ok, data = request_matakuliah(user_id, cookies)
+            ok, data = request_matakuliah(cookies)
             result_text, error_msg = parse_matakuliah_response(data)
 
         if ok:
@@ -553,7 +524,6 @@ async def matakuliah_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error fetching matakuliah: {e}")
         await update.message.reply_text("Wonten kesalahan pas mendapatkan matakuliah. Cobi malih nggih Juragan.")
 
-materi_cache = {}
 
 async def materi_list(update: Update, context):
     user_id = get_user_id(update)
@@ -583,7 +553,7 @@ async def materi_list(update: Update, context):
                 await update.message.reply_text("Nyuwun pangapunten, boten wonten materi ingkang ketemu.")
                 return
                 
-            materi_cache[user_id] = materi
+            save_materi_cache(user_id, materi)
             keyboard = []
             print(materi)
             for i, m in enumerate(materi):
@@ -624,12 +594,13 @@ async def handle_materi_callback(update: Update, context: ContextTypes.DEFAULT_T
             print(f"[callback] Invalid index in '{query.data}'")
             return
             
-        print(f"[callback] materi_cache keys: {list(materi_cache.keys())}, looking for user_id='{user_id}', index={index}")
-        if user_id not in materi_cache or index >= len(materi_cache[user_id]):
+        print(f"[callback] looking for materi cache for user_id='{user_id}', index={index}")
+        cached = get_materi_cache(user_id)
+        if not cached or index >= len(cached):
             await query.message.reply_text("Sesi materi sampun kadaluarsa. Monggo panggil /materi malih nggih Juragan.")
             return
             
-        m = materi_cache[user_id][index]
+        m = cached[index]
         link = m['link']
         title = m['title']
         is_download = m.get('is_download', False)
@@ -758,6 +729,17 @@ async def describe(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                     """)
     return ConversationHandler.END 
 
+async def chat_with_bot(update, context, name, user_text):
+    chat = await client.chat.completions.create(
+            model="openai/gpt-oss-120b:free",
+            messages=[
+                {"role": "system", "content": instruction(name)},
+                {"role": "user", "content": user_text}
+            ],
+            extra_body={"reasoning": {"enabled": True}}
+        )
+    return chat
+
 async def handle_telegram_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = get_user_id(update)
     user_text = update.message.text
@@ -775,24 +757,20 @@ async def handle_telegram_message(update: Update, context: ContextTypes.DEFAULT_
     await saveChatLog(user_id, user_text, "User")
     
     try:
-        chat = client.chats.create(
-            model=GEMINI_MODEL,
-            config=types.GenerateContentConfig(system_instruction=gemini_instruction(name)),
-        )
+        chat = await chat_with_bot(update, context, name, user_text)
         
-        response = chat.send_message(user_text)
-        full_text = response.text
+        response = chat.choices[0].message.content
         
-        await saveChatLog(user_id, full_text, "Gemini")
+        await saveChatLog(user_id, response, "Bot")
         
-        if len(full_text) > 4000:
-            for i in range(0, len(full_text), 4000):
-                await update.message.reply_text(full_text[i:i+4000])
+        if len(response) > 4000:
+            for i in range(0, len(response), 4000):
+                await update.message.reply_text(response[i:i+4000])
         else:
-            await update.message.reply_text(full_text)
+            await update.message.reply_text(response)
 
     except Exception as e:
-        print(f"Error in Gemini logic: {e}")
+        print(f"Error in Bot logic: {e}")
         if "timed out" in str(e).lower():
             await update.message.reply_text("Nyuwun pangapunten Juragan, pitakonipun radi dangu anggen kula mikir. Cobi dipun damel langkung ringkes nggih.")
         else:
@@ -821,6 +799,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize MongoDB indexes safely (won't crash if DB is down)
+    init_db()
+    
     # Timeout harus cukup besar untuk upload file besar ke Telegram (PDF bisa 2MB+)
     req = HTTPXRequest(connection_pool_size=8, connect_timeout=30.0, read_timeout=120.0, write_timeout=120.0)
     tg_app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).request(req).build()
