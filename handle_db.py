@@ -33,7 +33,7 @@ materi_cache_col = db_user['materi_cache']
 MATERI_CACHE_TTL_MINUTES = 15
 
 def init_db():
-    """Create indexes safely. Call this from app startup (e.g. FastAPI lifespan), not at import time."""
+    # index file
     try:
         materi_cache_col.create_index("expires_at", expireAfterSeconds=0)
         print("✅ MongoDB indexes created successfully")
