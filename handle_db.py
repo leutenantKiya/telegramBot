@@ -118,7 +118,6 @@ def getLogHistory(user_id):
 
 # ─── Materi Cache (MongoDB with TTL) ───
 def save_materi_cache(user_id, materi_list):
-    """Cache materi list for a user. Auto-expires after MATERI_CACHE_TTL_MINUTES."""
     try:
         materi_cache_col.update_one(
             {"user_id": str(user_id)},
