@@ -70,6 +70,14 @@ user_sessions = {}
 def get_user_id(update: Update):
     return str(update.effective_user.id)
 
+def get_telegram_api_urls():
+    proxy_url = (os.getenv("TELEGRAM_PROXY_URL") or "").strip().rstrip("/")
+    if not proxy_url:
+        return None, None
+
+    proxy_url = re.sub(r"/(?:file/)?bot$", "", proxy_url)
+    return f"{proxy_url}/bot", f"{proxy_url}/file/bot"
+
 # set session
 def set_eclass_session(user_id, id_user, cookies):
     user_sessions[user_id] = {
@@ -806,13 +814,19 @@ async def lifespan(app: FastAPI):
     req = HTTPXRequest(connection_pool_size=8, connect_timeout=60.0, read_timeout=120.0, write_timeout=120.0)
     # Separate request object for long-polling (get_updates needs longer read timeout)
     get_updates_req = HTTPXRequest(connection_pool_size=2, connect_timeout=60.0, read_timeout=300.0, write_timeout=120.0)
-    tg_app = (
+    tg_builder = (
         ApplicationBuilder()
         .token(os.getenv("TELEGRAM_TOKEN"))
         .request(req)
         .get_updates_request(get_updates_req)
-        .build()
     )
+
+    telegram_base_url, telegram_base_file_url = get_telegram_api_urls()
+    if telegram_base_url:
+        print(f"Using Telegram API proxy: {telegram_base_url}")
+        tg_builder = tg_builder.base_url(telegram_base_url).base_file_url(telegram_base_file_url)
+
+    tg_app = tg_builder.build()
     
     tg_app.add_error_handler(error_handler)
     commands = [

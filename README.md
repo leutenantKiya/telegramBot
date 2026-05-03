@@ -46,6 +46,9 @@ Isi file `.env` tersebut dengan format berikut:
 # Token Bot Telegram (Didapatkan dari BotFather di Telegram)
 TELEGRAM_TOKEN=your_telegram_bot_token_here
 
+# Optional: Cloudflare Worker proxy untuk Telegram API
+TELEGRAM_PROXY_URL=https://your-worker.username.workers.dev
+
 # API Key untuk Open Router (Didapatkan dari openrouter.ai)
 OPENROUTER_API_KEY=your_openrouter_api_key_here
 
