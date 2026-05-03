@@ -43,16 +43,16 @@ from telegram.ext import (
 )
 
 import socket
+import sys
 
-# Force IPv4 to prevent httpx.ConnectError on broken IPv6 networks
-old_getaddrinfo = socket.getaddrinfo
-def new_getaddrinfo(*args, **kwargs):
-    responses = old_getaddrinfo(*args, **kwargs)
-    # (2, 1, 6, '', ('142.250.193.206', 80)),  
-    # (30, 1, 6, '', ('2404:6800:4003::8b', 80)) -> throw this usntable IPv6_7
-    return [response for response in responses if response[0] == socket.AF_INET]
-socket.getaddrinfo = new_getaddrinfo
-# this is monkey patching -> changing the main code with my own to force ip4 usage
+# Force IPv4 ONLY on Windows to prevent httpx.ConnectError on broken IPv6 networks
+# On Linux/Docker (HF Spaces), IPv6 works fine and this patch causes ConnectTimeout
+if sys.platform == 'win32':
+    old_getaddrinfo = socket.getaddrinfo
+    def new_getaddrinfo(*args, **kwargs):
+        responses = old_getaddrinfo(*args, **kwargs)
+        return [response for response in responses if response[0] == socket.AF_INET]
+    socket.getaddrinfo = new_getaddrinfo
 
 load_dotenv()
 
@@ -827,8 +827,21 @@ async def lifespan(app: FastAPI):
     tg_app.add_handler(CallbackQueryHandler(handle_materi_callback))
     tg_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_telegram_message))
     
-    await tg_app.initialize()
-    await tg_app.start()
+    # Retry initialization in case of timeout (common in cloud/Docker environments)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            await tg_app.initialize()
+            await tg_app.start()
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 5 * (attempt + 1)
+                print(f"⚠️ Bot init attempt {attempt+1}/{max_retries} failed: {e}. Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"❌ Bot initialization failed after {max_retries} attempts: {e}")
+                raise
     
     try:
         await tg_app.bot.set_my_commands(commands=commands)
