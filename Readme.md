@@ -1,3 +1,12 @@
+---
+title: Aily Bot
+emoji: 🤖
+colorFrom: blue
+colorTo: purple
+sdk: docker
+pinned: false
+---
+
 # Dokumentasi Arsitektur & Fungsi Bot Telegram (Aily)
 
 Dokumen ini memuat penjelasan mengenai arsitektur sistem, alur logika, dan detail fungsionalitas dari setiap komponen dalam proyek Bot Telegram Aily yang terintegrasi dengan web E-Class kampus.
