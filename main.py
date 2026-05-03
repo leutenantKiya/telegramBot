@@ -802,9 +802,17 @@ async def lifespan(app: FastAPI):
     # Initialize MongoDB indexes safely (won't crash if DB is down)
     init_db()
     
-    # Timeout harus cukup besar untuk upload file besar ke Telegram (PDF bisa 2MB+)
-    req = HTTPXRequest(connection_pool_size=8, connect_timeout=30.0, read_timeout=120.0, write_timeout=120.0)
-    tg_app = ApplicationBuilder().token(os.getenv("TELEGRAM_TOKEN")).request(req).build()
+    # Timeout harus besar untuk cloud environments (HF Spaces) + upload file besar
+    req = HTTPXRequest(connection_pool_size=8, connect_timeout=60.0, read_timeout=120.0, write_timeout=120.0)
+    # Separate request object for long-polling (get_updates needs longer read timeout)
+    get_updates_req = HTTPXRequest(connection_pool_size=2, connect_timeout=60.0, read_timeout=300.0, write_timeout=120.0)
+    tg_app = (
+        ApplicationBuilder()
+        .token(os.getenv("TELEGRAM_TOKEN"))
+        .request(req)
+        .get_updates_request(get_updates_req)
+        .build()
+    )
     
     tg_app.add_error_handler(error_handler)
     commands = [
